@@ -4,7 +4,7 @@ import os
 from django import template
 from django.template import Template, TemplateSyntaxError, TemplateDoesNotExist
 from django.template.loader_tags import ExtendsNode
-from django.template.loader import find_template_loader, LoaderOrigin
+from django.template.loader import find_template, get_template_from_string, LoaderOrigin
 
 
 register = template.Library()
@@ -22,29 +22,30 @@ class OverExtendsNode(ExtendsNode):
     list of template directories to search for the template, based on
     the directories that the known template loaders
     (``app_directories`` and ``filesystem``) use. This list gets stored
-    in the template context, and each time a template is found, its
+    in the template context, and each time a template is extended, its
     absolute path gets removed from the list, so that subsequent
     searches for the same relative name/path can find parent templates
     in other directories, which allows circular inheritance to occur.
 
     Django's ``app_directories``, ``filesystem``, and ``cached``
-    loaders are supported. The ``eggs`` loader, and any loader that
-    implements ``load_template_source`` with a source string returned,
-    should also theoretically work.
+    loaders are supported. The ``eggs`` loader, and any other loaders
+    which use and set ``LoaderOrigin`` should also theoretically work.
     """
 
-    def __init__(self, nodelist, parent_name, template_dirs=None, template_name=None):
+    context_name = "OVEREXTENDS_DIRS"
+
+    def __init__(self, nodelist, parent_name, template_name, template_path, template_dirs=None):
         super(OverExtendsNode, self).__init__(nodelist, parent_name, template_dirs)
 
         self.template_name = template_name
+        self.template_path = template_path
 
-    def find_template(self, name, context, peeking=False):
+    def populate_context(self, context):
         """
-        Replacement for Django's ``find_template`` that uses the current
-        template context to keep track of which template directories it
-        has used when finding a template. This allows multiple templates
-        with the same relative name/path to be discovered, so that
-        circular template inheritance can occur.
+        Store a dictionary in the template context mapping template
+        names to the lists of template directories available to
+        search for that template. Each time a template is extended, its
+        origin directory is removed from its directories list.
         """
 
         # These imports want settings, which aren't available when this
@@ -52,68 +53,69 @@ class OverExtendsNode(ExtendsNode):
         from django.template.loaders.app_directories import app_template_dirs
         from django.conf import settings
 
-        # Store a dictionary in the template context mapping template
-        # names to the lists of template directories available to
-        # search for that template. Each time a template is loaded, its
-        # origin directory is removed from its directories list.
-        context_name = "OVEREXTENDS_DIRS"
-        if context_name not in context:
-            context[context_name] = {}
-        if name not in context[context_name]:
+        if self.context_name not in context:
+            context[self.context_name] = {}
+        if self.template_name not in context[self.context_name]:
             all_dirs = list(settings.TEMPLATE_DIRS) + list(app_template_dirs)
             # os.path.abspath is needed under uWSGI, and also ensures we
             # have consistent path separators across different OSes.
-            context[context_name][name] = list(map(os.path.abspath, all_dirs))
+            context[self.context_name][self.template_name] = list(map(os.path.abspath, all_dirs))
 
-        # Build a list of template loaders to use. For loaders that wrap
-        # other loaders like the ``cached`` template loader, unwind its
-        # internal loaders and add those instead.
-        loaders = []
-        for loader_name in settings.TEMPLATE_LOADERS:
-            loader = find_template_loader(loader_name)
-            loaders.extend(getattr(loader, "loaders", [loader]))
+    def remove_template_path(self, context):
+        """
+        Remove template's absolute path from the context dict so
+        that it won't be used again when the same relative name/path
+        is requested.
+        """
 
-        # Go through the loaders and try to find the template. When
-        # found, removed its absolute path from the context dict so
-        # that it won't be used again when the same relative name/path
-        # is requested.
-        for loader in loaders:
-            dirs = context[context_name][name]
-            try:
-                source, path = loader.load_template_source(name, dirs)
-            except TemplateDoesNotExist:
-                pass
-            else:
-                # Only remove the absolute path for the initial call in
-                # get_parent, and not when we're peeking during the
-                # second call.
-                if not peeking:
-                    remove_path = os.path.abspath(path[:-len(name) - 1])
-                    context[context_name][name].remove(remove_path)
-                return Template(source)
-        raise TemplateDoesNotExist(name)
+        remove_path = os.path.abspath(self.template_path[:-len(self.template_name) - 1])
+        # The following should always succeed otherwise we have some unsupported
+        # configuration - template was loaded from a source which was not added in
+        # populate_context.
+        context[self.context_name][self.template_name].remove(remove_path)
+
+    def find_template(self, template_name, context):
+        """
+        Wrapper for Django's ``find_template`` that uses the current
+        template context to keep track of which template directories have
+        already been used when finding a template and skips them.
+        This allows multiple templates with the same relative name/path to
+        be discovered, so that circular template inheritance cannot occur.
+        """
+
+        dirs = context[self.context_name].get(template_name, None)
+        return find_template(template_name, dirs)
 
     def get_parent(self, context):
         """
-        Load the parent template using our own ``find_template``, which
-        will cause its absolute path to not be used again. Then peek at
-        the first node, and if its parent arg is the same as the
-        current parent arg, we know circular inheritance is going to
-        occur, in which case we try and find the template again, with
-        the absolute directory removed from the search list.
+        Same as Django's ``get_parent``, only calling our ``get_template``.
         """
-        parent = self.parent_name.resolve(context)
-        # If parent is a template object, just return it.
-        if hasattr(parent, "render"):
-            return parent
-        template = self.find_template(parent, context)
-        if self.template_name is None or parent == self.template_name:
-            for node in template.nodelist:
-                if (isinstance(node, ExtendsNode) and
-                        node.parent_name.resolve(context) == parent):
-                    return self.find_template(parent, context, peeking=True)
-        return template
 
+        parent = self.parent_name.resolve(context)
+        if not parent:
+            error_msg = "Invalid template name in 'extends' tag: %r." % parent
+            if self.parent_name.filters or\
+                    isinstance(self.parent_name.var, Variable):
+                error_msg += " Got this from the '%s' variable." %\
+                    self.parent_name.token
+            raise TemplateSyntaxError(error_msg)
+        if hasattr(parent, 'render'):
+            return parent # parent is a Template object
+        return self.get_template(parent, context)
+
+    def get_template(self, template_name, context):
+        """
+        Similar to Django's ``get_template``, but tracking used template
+        directories.
+        """
+
+        self.populate_context(context)
+        self.remove_template_path(context)
+        template, origin = self.find_template(template_name, context)
+        if not hasattr(template, 'render'):
+            # template needs to be compiled
+            template = get_template_from_string(template, origin, template_name)
+        return template
 
 @register.tag
 def overextends(parser, token):
@@ -122,13 +124,20 @@ def overextends(parser, token):
     inheritance to occur, eg a template can both be overridden and
     extended at once.
     """
+
+    bits = token.split_contents()
+
     template_name = None
+    template_path = None
     if hasattr(token, 'source'):
         origin, source = token.source
         if isinstance(origin, LoaderOrigin):
             template_name = origin.loadname
+            template_path = origin.name
 
-    bits = token.split_contents()
+    if template_name is None or template_path is None:
+        raise TemplateSyntaxError("'%s' can only be used with templates loaded by template loaders using and setting 'LoaderOrigin'" % bits[0])
+
     if len(bits) != 2:
         raise TemplateSyntaxError("'%s' takes one argument" % bits[0])
     parent_name = parser.compile_filter(bits[1])
@@ -136,4 +145,4 @@ def overextends(parser, token):
     if nodelist.get_nodes_by_type(ExtendsNode):
         raise TemplateSyntaxError("'%s' cannot appear more than once "
                                   "in the same template" % bits[0])
-    return OverExtendsNode(nodelist, parent_name, None, template_name)
+    return OverExtendsNode(nodelist, parent_name, template_name, template_path)
