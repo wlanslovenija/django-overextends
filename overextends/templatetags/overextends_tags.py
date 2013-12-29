@@ -4,7 +4,7 @@ import os
 from django import template
 from django.template import Template, TemplateSyntaxError, TemplateDoesNotExist
 from django.template.loader_tags import ExtendsNode
-from django.template.loader import find_template_loader
+from django.template.loader import find_template_loader, LoaderOrigin
 
 
 register = template.Library()
@@ -32,6 +32,11 @@ class OverExtendsNode(ExtendsNode):
     implements ``load_template_source`` with a source string returned,
     should also theoretically work.
     """
+
+    def __init__(self, nodelist, parent_name, template_dirs=None, template_name=None):
+        super(OverExtendsNode, self).__init__(nodelist, parent_name, template_dirs)
+
+        self.template_name = template_name
 
     def find_template(self, name, context, peeking=False):
         """
@@ -102,10 +107,11 @@ class OverExtendsNode(ExtendsNode):
         if hasattr(parent, "render"):
             return parent
         template = self.find_template(parent, context)
-        for node in template.nodelist:
-            if (isinstance(node, ExtendsNode) and
-                    node.parent_name.resolve(context) == parent):
-                return self.find_template(parent, context, peeking=True)
+        if self.template_name is None or parent == self.template_name:
+            for node in template.nodelist:
+                if (isinstance(node, ExtendsNode) and
+                        node.parent_name.resolve(context) == parent):
+                    return self.find_template(parent, context, peeking=True)
         return template
 
 
@@ -116,6 +122,12 @@ def overextends(parser, token):
     inheritance to occur, eg a template can both be overridden and
     extended at once.
     """
+    template_name = None
+    if hasattr(token, 'source'):
+        origin, source = token.source
+        if isinstance(origin, LoaderOrigin):
+            template_name = origin.loadname
+
     bits = token.split_contents()
     if len(bits) != 2:
         raise TemplateSyntaxError("'%s' takes one argument" % bits[0])
@@ -124,4 +136,4 @@ def overextends(parser, token):
     if nodelist.get_nodes_by_type(ExtendsNode):
         raise TemplateSyntaxError("'%s' cannot appear more than once "
                                   "in the same template" % bits[0])
-    return OverExtendsNode(nodelist, parent_name, None)
+    return OverExtendsNode(nodelist, parent_name, None, template_name)
