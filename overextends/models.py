@@ -1,13 +1,13 @@
-from django.conf import settings
 
 # This app doesn't contain any models, but as its template tags need to
 # be added to built-ins at start-up time, this is a good place to do it.
 
-from django.template import loader as template_loader
+from django.template.base import add_to_builtins
 
-template_loader.add_to_builtins("overextends.templatetags.overextends_tags")
 
-from django.template import base, debug
+add_to_builtins("overextends.templatetags.overextends_tags")
+
+from django.template import base, debug, loader as template_loader
 
 # We have to monkey-patch Django to pass origins to tokens even when
 # TEMPLATE_DEBUG is set to False. This is required to know which
