@@ -4,7 +4,7 @@ import os
 from django import template
 from django.template import Template, TemplateSyntaxError, TemplateDoesNotExist
 from django.template.loader_tags import ExtendsNode
-from django.template.loader import find_template, get_template_from_string, LoaderOrigin
+from django.template.loader import LoaderOrigin
 
 
 register = template.Library()
@@ -50,8 +50,17 @@ class OverExtendsNode(ExtendsNode):
 
         # These imports want settings, which aren't available when this
         # module is imported to ``add_to_builtins``, so do them here.
-        from django.template.loaders.app_directories import app_template_dirs
         from django.conf import settings
+
+        # Find the app_template_dirs (moved in Django 1.8)
+        import django.template.loaders.app_directories as app_directories
+        try:
+            # Django >= 1.8
+            get_app_template_dirs = app_directories.get_app_template_dirs
+            app_template_dirs = get_app_template_dirs('templates')
+        except AttributeError:
+            # Django <= 1.7
+            app_template_dirs = app_directories.app_template_dirs
 
         if self.context_name not in context:
             context[self.context_name] = {}
@@ -84,6 +93,15 @@ class OverExtendsNode(ExtendsNode):
         """
 
         dirs = context[self.context_name].get(template_name, None)
+
+        # Find the find_template function (it moved in Django 1.8)
+        try:
+            # Django >= 1.8
+            find_template = context.template.engine.find_template
+        except AttributeError:
+            # Django <= 1.7
+            from django.template.loader import find_template
+ 
         return find_template(template_name, dirs)
 
     def get_parent(self, context):
@@ -113,8 +131,14 @@ class OverExtendsNode(ExtendsNode):
         self.remove_template_path(context)
         template, origin = self.find_template(template_name, context)
         if not hasattr(template, 'render'):
-            # template needs to be compiled
-            template = get_template_from_string(template, origin, template_name)
+            # Find the get_template_from_string function (it moved in Django 1.8)
+            try:
+                # Django >= 1.8
+                template = context.template.engine.from_string(template)
+            except AttributeError:
+                # Django <= 1.7
+                from django.template.loader import get_template_from_string
+                template = get_template_from_string(template, origin, template_name)
         return template
 
 @register.tag
