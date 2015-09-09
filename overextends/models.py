@@ -1,3 +1,4 @@
+import types
 
 # This app doesn't contain any models, but as its template tags need to
 # be added to built-ins at start-up time, this is a good place to do it.
@@ -24,3 +25,16 @@ def make_origin(display_name, loader, name, dirs):
         return None
 
 template_loader.make_origin = make_origin
+
+# Django 1.8.
+try:
+    from django.template import engine
+
+    # Wrap the function to include a self argument.
+    def engine_make_origin(self, *args):
+        return make_origin(*args)
+
+    engine.Engine.make_origin = types.MethodType(engine_make_origin, None, engine.Engine)
+    engine.Lexer = debug.DebugLexer
+except ImportError:
+    pass
