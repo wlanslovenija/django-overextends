@@ -1,14 +1,11 @@
 import types
 
-# This app doesn't contain any models, but as its template tags need to
-# be added to built-ins at start-up time, this is a good place to do it.
-
-from django.template.base import add_to_builtins
-
-
-add_to_builtins("overextends.templatetags.overextends_tags")
-
+import django
 from django.template import base, debug, loader as template_loader
+
+if django.VERSION < (1, 9):
+    base.add_to_builtins("overextends.templatetags.overextends_tags")
+
 
 # We have to monkey-patch Django to pass origins to tokens even when
 # TEMPLATE_DEBUG is set to False. This is required to know which
@@ -26,7 +23,7 @@ def make_origin(display_name, loader, name, dirs):
 
 template_loader.make_origin = make_origin
 
-# Django 1.8.
+# Django 1.8+.
 try:
     from django.template import engine
 
